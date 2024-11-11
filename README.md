@@ -1,42 +1,68 @@
-# Ansible Dynamic Inventory for OpenStack
+# OpenStack Dynamic Inventory for Ansible
 
-A dynamic inventory script for Ansible that automatically discovers and groups hosts in OpenStack with support for multiple networks and Terraform-style metadata.
+A dynamic inventory script for Ansible that filters and groups OpenStack hosts based on metadata and manages network interface priority for connections.
 
 ## Features
 
-- Automatic discovery of all instances in OpenStack
-- Support for multiple network interfaces
-- Terraform metadata-based grouping
-- Hierarchical group structure
-- Automatic creation of combined groups
-- Support for different networks for SSH connections
+- Instance filtering by environment tag
+- Automatic grouping by metadata
+- Network interface prioritization for connections
+- Instance flavor information retrieval
+- Multiple network interface support
+- Flexible YAML configuration
 
 ## Requirements
 
-Install the required dependencies:
+- Python 3.6+
+- OpenStack SDK
+- PyYAML
+- OpenStack API access
+
+## Installation
+
+1. Install dependencies:
 ```bash
-pip install -r requirements.txt
+pip install openstacksdk pyyaml
 ```
 
-Contents of `requirements.txt`:
-```
-python-openstackclient>=6.0.0
-openstacksdk>=1.0.0
-ansible-core>=2.13.0
-jmespath>=1.0.1
-netaddr>=0.8.0
-PyYAML>=6.0
-requests>=2.28.0
-cryptography>=38.0.0
-python-keystoneclient>=5.0.0
+2. Copy the script and make it executable:
+```bash
+cp openstack_inventory.py /etc/ansible/inventory/
+chmod +x /etc/ansible/inventory/openstack_inventory.py
 ```
 
-## Environment Setup
+3. Create configuration file:
+```bash
+cp inventory_config.yaml /etc/ansible/inventory/
+```
 
-### OpenStack Environment Variables
+## Configuration
 
-Configure environment variables:
+### Configuration File Structure (inventory_config.yaml)
 
+```yaml
+all:
+  vars:
+    inventory_settings:
+      environment_tag: "environment"    # tag name for filtering
+      environment_value: "dwh"          # tag value for filtering
+      base_group_name: "dwh"           # base group name in inventory
+      network_priority:                 # network priority (highest to lowest)
+        - "internal_cloud_network"
+        - "ps_colo_int_1"
+      debug:
+        enabled: false
+        log_file: "inventory.log"
+```
+
+### Environment Variables
+
+1. For script configuration:
+```bash
+export INVENTORY_CONFIG=/etc/ansible/inventory/inventory_config.yaml
+```
+
+2. For OpenStack connection:
 ```bash
 export OS_AUTH_URL=http://your-openstack-auth-url:5000/v3
 export OS_PROJECT_NAME=your-project
@@ -47,166 +73,99 @@ export OS_PROJECT_DOMAIN_NAME=default
 export OS_USER_DOMAIN_NAME=default
 ```
 
-### Or use clouds.yaml
+## Usage
 
-```yaml
-clouds:
-  openstack:
-    auth:
-      auth_url: http://your-openstack-auth-url:5000/v3
-      username: your-username
-      password: your-password
-      project_name: your-project
-      project_domain_name: default
-      user_domain_name: default
-    region_name: your-region
-```
+### Basic Usage
 
-## Installation
-
-1. Copy the `openstack_inventory.py` script to your project directory
-2. Make the script executable:
-```bash
-chmod +x openstack_inventory.py
-```
-
-## Ansible Configuration
-
-### ansible.cfg
-```ini
-[inventory]
-enable_plugins = script
-
-[defaults]
-inventory = /path/to/openstack_inventory.py
-```
-
-### Verify inventory
+1. Test script operation:
 ```bash
 ./openstack_inventory.py --list
 ```
 
-## Usage with Terraform
-
-### Example Terraform Metadata
-```hcl
-resource "openstack_compute_instance_v2" "instance" {
-  name = "postgres-master-01"
-  # ... other parameters ...
-
-  metadata = {
-    environment  = "dwh"
-    project     = "dwh"
-    service_type = "postgres"
-    role        = "master"
-  }
-}
+2. Use with Ansible:
+```bash
+ansible-playbook -i openstack_inventory.py playbook.yml
 ```
 
-## Usage Examples
+### Host Grouping
 
-### 1. Basic Usage
+The script automatically creates the following groups:
+
+1. Base group (default "dwh")
+2. Metadata-based groups (e.g., "project_analytics", "role_master")
+
+Example of using groups in playbook:
 ```yaml
-- hosts: tag_environment_dwh
+- hosts: dwh
   tasks:
-    - name: Configure DWH environment servers
+    - name: All hosts with environment=dwh
+      # tasks...
+
+- hosts: role_master
+  tasks:
+    - name: All master nodes
+      # tasks...
+
+- hosts: project_analytics
+  tasks:
+    - name: All hosts in analytics project
       # tasks...
 ```
 
-### 2. Using with Specific Network
-```yaml
-- hosts: tag_service_type_postgres:&network_private
-  tasks:
-    - name: Configure PostgreSQL via private network
-      # tasks...
-```
-
-### 3. Combined Groups
-```yaml
-- hosts: postgres_dwh
-  tasks:
-    - name: Configure PostgreSQL in DWH environment
-      # tasks...
-```
-
-### 4. Using with Bastion Host
-```yaml
-- hosts: tag_role_master
-  vars:
-    ansible_ssh_common_args: '-o ProxyCommand="ssh -W %h:%p bastion.internal"'
-  tasks:
-    - name: Configure master nodes
-      # tasks...
-```
-
-## Group Structure
-
-The script creates the following group structure:
-
-1. Metadata Type Groups:
-   - `type_environment`
-   - `type_project`
-   - `type_service_type`
-   - `type_role`
-
-2. Metadata Value Groups:
-   - `tag_environment_dwh`
-   - `tag_service_type_postgres`
-   - `tag_role_master`
-   etc.
-
-3. Network Groups:
-   - `network_private`
-   - `network_public`
-
-4. Combined Groups:
-   - `postgres_dwh`
-   - `redis_prod`
-   etc.
-
-## Host Variables
+### Available Host Variables
 
 The following variables are available for each host:
 
 ```yaml
 hostvars:
-  webserver_private:
-    ansible_host: "10.0.0.2"
-    network_name: "private"
-    network_interfaces:
-      private: ["10.0.0.2"]
-      public: ["203.0.113.2"]
-    openstack_id: "instance-id"
-    openstack_name: "server-name"
-    openstack_status: "ACTIVE"
-    environment: "dwh"
-    project: "dwh"
-    service_type: "postgres"
-    role: "master"
+  your-server-name:
+    ansible_host: "10.0.0.2"              # Connection IP
+    ansible_ssh_host: "10.0.0.2"          # Connection IP (duplicate for compatibility)
+    openstack_id: "instance-id"           # Instance ID
+    openstack_name: "server-name"         # Server name
+    preferred_network: "network-name"      # Used network name
+    network_interfaces:                    # All available network interfaces
+      network1: ["10.0.0.2"]
+      network2: ["192.168.1.2"]
+    openstack_metadata:                    # Server metadata
+      environment: "dwh"
+      project: "analytics"
+      role: "master"
+    openstack_flavor_id: "flavor-id"      # Instance type ID
+    openstack_flavor_name: "flavor-name"  # Instance type name
 ```
 
 ## Debugging
 
-### View all groups and hosts
+1. Check list of all hosts and groups:
 ```bash
 ./openstack_inventory.py --list | jq
 ```
 
-### View variables for a specific host
+2. View information about specific host:
 ```bash
 ./openstack_inventory.py --host hostname | jq
 ```
 
+## Network Priority
+
+The script selects connection IP in the following order:
+1. Looks for networks from network_priority list in specified order
+2. If network is found, uses first available IPv4 address from that network
+3. If priority networks not found, uses first available IPv4 address from any network
+
+## Error Handling
+
+The script will exit with error in the following cases:
+- Configuration file not found
+- Configuration file format error
+- Missing required configuration parameters
+- Failed to connect to OpenStack
+- Error retrieving data from OpenStack
+
 ## Known Limitations
 
 1. Only IPv4 addresses are supported
-2. Requires access to OpenStack API
-3. Performance depends on the number of servers and OpenStack API speed
-
-## Usage Tips
-
-1. Use consistent server naming scheme
-2. Add all necessary metadata when creating servers in Terraform
-3. Group servers by all important attributes using metadata
-4. Use different networks for different types of access
-5. Configure SSH through bastion for secure access
+2. OpenStack API access required
+3. Host will not be added to inventory if no suitable IP address is found
+4. All group names are generated in `key_value` format from metadata
