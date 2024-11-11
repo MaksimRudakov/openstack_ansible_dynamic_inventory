@@ -2,46 +2,118 @@
 
 import json
 import os
+import sys
 import argparse
+import yaml
 from openstack import connection
 
 class OpenStackInventory(object):
-    """
-    Dynamic inventory script for OpenStack that supports multiple networks
-    and Terraform-style metadata grouping.
-    """
     def __init__(self):
         self.inventory = {}
-        self.conn = self._get_connection()
-        # Define key metadata fields for grouping
-        # These fields are expected from Terraform's metadata configuration
-        self.important_metadata = [
-            'environment',    # e.g., prod, stage, dev
-            'project',        # project name
-            'service_type',   # e.g., postgres, redis, web
-            'role'           # e.g., master, slave, frontend
-        ]
+        self.conn = None
+        self._load_config()
+        self._init_connection()
 
-    def _get_connection(self):
+    def _validate_config(self, config):
         """
-        Establishes connection to OpenStack using environment variables.
+        Validate configuration values
         """
-        return connection.Connection(
-            auth_url=os.getenv('OS_AUTH_URL'),
-            project_name=os.getenv('OS_PROJECT_NAME'),
-            username=os.getenv('OS_USERNAME'),
-            password=os.getenv('OS_PASSWORD'),
-            region_name=os.getenv('OS_REGION_NAME'),
-            project_domain_name=os.getenv('OS_PROJECT_DOMAIN_NAME', 'default'),
-            user_domain_name=os.getenv('OS_USER_DOMAIN_NAME', 'default')
-        )
+        settings = config.get('all', {}).get('vars', {}).get('inventory_settings', {})
+        required_fields = ['environment_tag', 'environment_value', 'base_group_name']
+
+        for field in required_fields:
+            if field not in settings:
+                sys.exit(f"Required configuration field missing: {field}")
+
+        if 'network_priority' not in settings or not isinstance(settings['network_priority'], list):
+            sys.exit("network_priority must be a list of network names")
+
+    def _load_config(self):
+        """
+        Load configuration from YAML file
+        """
+        config_path = os.getenv('INVENTORY_CONFIG', 'inventory_config.yaml')
+
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+        except FileNotFoundError:
+            sys.exit(f"Configuration file not found: {config_path}")
+        except yaml.YAMLError as e:
+            sys.exit(f"Error parsing configuration file: {e}")
+
+        # Validate configuration
+        self._validate_config(config)
+
+        # Get settings from config
+        settings = config.get('all', {}).get('vars', {}).get('inventory_settings', {})
+
+        # Load configurations
+        self.filter_config = {
+            'environment_tag': settings.get('environment_tag', 'environment'),
+            'environment_value': settings.get('environment_value', 'dwh'),
+            'base_group_name': settings.get('base_group_name', 'dwh')
+        }
+
+        self.network_priority = settings.get('network_priority', [
+            'internal_cloud_network',
+            'PS-Colo-BilimLand2-int'
+        ])
+
+    def _init_connection(self):
+        """
+        Initialize OpenStack connection
+        """
+        try:
+            self.conn = connection.Connection(
+                auth_url=os.getenv('OS_AUTH_URL'),
+                project_name=os.getenv('OS_PROJECT_NAME'),
+                username=os.getenv('OS_USERNAME'),
+                password=os.getenv('OS_PASSWORD'),
+                region_name=os.getenv('OS_REGION_NAME'),
+                project_domain_name=os.getenv('OS_PROJECT_DOMAIN_NAME', 'default'),
+                user_domain_name=os.getenv('OS_USER_DOMAIN_NAME', 'default')
+            )
+        except Exception as e:
+            sys.exit(f"Failed to connect to OpenStack: {e}")
+
+    def _should_include_server(self, server):
+        """
+        Check if server should be included in inventory based on filter settings
+        """
+        if not hasattr(server, 'metadata'):
+            return False
+
+        env_tag = self.filter_config['environment_tag']
+        env_value = self.filter_config['environment_value']
+
+        return (env_tag in server.metadata and
+                server.metadata[env_tag] == env_value)
+
+    def _get_preferred_ip(self, addresses):
+        """
+        Select IP address based on network priority
+        """
+        # First try priority list
+        for network_name in self.network_priority:
+            if network_name in addresses:
+                for address in addresses[network_name]:
+                    if address['version'] == 4:  # IPv4
+                        return address['addr'], network_name
+
+        # If not found in priority list, take first available IPv4
+        for network_name, address_list in addresses.items():
+            for address in address_list:
+                if address['version'] == 4:
+                    return address['addr'], network_name
+
+        return None, None
 
     def _get_groups(self):
         """
-        Initialize the base inventory structure and metadata type groups.
-        Creates hierarchy of groups based on metadata types.
+        Initialize inventory structure
         """
-        # Initialize basic inventory structure with _meta and all groups
+        base_group = self.filter_config['base_group_name']
         self.inventory = {
             '_meta': {
                 'hostvars': {}
@@ -49,129 +121,104 @@ class OpenStackInventory(object):
             'all': {
                 'hosts': [],
                 'vars': {}
+            },
+            base_group: {
+                'hosts': [],
+                'vars': {
+                    'environment_tag': self.filter_config['environment_tag'],
+                    'environment_value': self.filter_config['environment_value'],
+                    'network_priority': self.network_priority
+                }
             }
         }
-        
-        # Create base groups for each metadata type
-        # These will serve as parent groups for actual metadata values
-        for metadata_key in self.important_metadata:
-            self.inventory[f'type_{metadata_key}'] = {
-                'children': []
-            }
 
-    def _add_to_groups(self, server_name, metadata):
+    def _add_host_to_groups(self, hostname, metadata):
         """
-        Add server to appropriate groups based on its metadata.
-        Creates hierarchical group structure and handles metadata-based grouping.
-        
-        Args:
-            server_name (str): Name of the server with network suffix
-            metadata (dict): Server metadata from OpenStack
+        Add host to appropriate groups based on metadata
         """
+        base_group = self.filter_config['base_group_name']
+        env_tag = self.filter_config['environment_tag']
+
+        # Add to base group
+        if hostname not in self.inventory[base_group]['hosts']:
+            self.inventory[base_group]['hosts'].append(hostname)
+
+        # Create groups based on metadata
         for key, value in metadata.items():
-            # Create group name based on metadata key-value pair
-            tag_group = f"tag_{key}_{value}"
-            
-            # Initialize group if it doesn't exist
-            if tag_group not in self.inventory:
-                self.inventory[tag_group] = {
-                    'hosts': [],
-                    'vars': {
-                        f'{key}_value': value
+            if key != env_tag:  # skip environment tag
+                group_name = f"{key}_{value}"
+                if group_name not in self.inventory:
+                    self.inventory[group_name] = {
+                        'hosts': [],
+                        'vars': {
+                            'group_tag': key,
+                            'group_value': value
+                        }
                     }
-                }
-            
-            # Add server to the tag group
-            if server_name not in self.inventory[tag_group]['hosts']:
-                self.inventory[tag_group]['hosts'].append(server_name)
-            
-            # Add tag group to its parent metadata type group
-            if key in self.important_metadata:
-                type_group = f'type_{key}'
-                if tag_group not in self.inventory[type_group]['children']:
-                    self.inventory[type_group]['children'].append(tag_group)
-
-    def _create_combined_groups(self):
-        """
-        Create combined groups based on environment and service type.
-        This allows for convenient targeting of specific services in specific environments.
-        Example: postgres_dwh group contains all postgres servers in dwh environment.
-        """
-        # Get all environment and service type groups
-        env_groups = [g for g in self.inventory.keys() if g.startswith('tag_environment_')]
-        service_groups = [g for g in self.inventory.keys() if g.startswith('tag_service_type_')]
-        
-        # Create combinations of environment and service type
-        for env_group in env_groups:
-            for service_group in service_groups:
-                env_name = env_group.split('_')[-1]
-                service_name = service_group.split('_')[-1]
-                combined_group = f"{service_name}_{env_name}"
-                
-                # Initialize combined group
-                self.inventory[combined_group] = {
-                    'hosts': [],
-                    'vars': {}
-                }
-                
-                # Find hosts that belong to both groups
-                common_hosts = set(self.inventory[env_group]['hosts']) & \
-                            set(self.inventory[service_group]['hosts'])
-                if common_hosts:
-                    self.inventory[combined_group]['hosts'] = list(common_hosts)
+                if hostname not in self.inventory[group_name]['hosts']:
+                    self.inventory[group_name]['hosts'].append(hostname)
 
     def _get_hosts(self):
         """
-        Retrieve and process all servers from OpenStack.
-        Handles multiple networks and metadata grouping.
+        Get and process hosts from OpenStack
         """
-        servers = self.conn.compute.servers()
-        
+        try:
+            servers = self.conn.compute.servers()
+            # Get all flavors once to avoid multiple API calls
+            flavors = {f.id: f.name for f in self.conn.compute.flavors()}
+        except Exception as e:
+            sys.exit(f"Failed to get data from OpenStack: {e}")
+
         for server in servers:
-            # Process each network interface of the server
-            for network_name, addresses in server.addresses.items():
-                for address in addresses:
-                    if address['version'] == 4:  # IPv4 only
-                        # Create unique host name including network
-                        host_name = f"{server.name}_{network_name}"
-                        
-                        # Collect server information
-                        server_vars = {
-                            'ansible_host': address['addr'],
-                            'openstack_id': server.id,
-                            'openstack_name': server.name,
-                            'openstack_status': server.status,
-                            'network_name': network_name,
-                            'network_interfaces': server.addresses
-                        }
-                        
-                        # Process server metadata if available
-                        if hasattr(server, 'metadata'):
-                            server_vars.update(server.metadata)
-                            # Add server to groups based on its metadata
-                            self._add_to_groups(host_name, server.metadata)
-                        
-                        # Store host variables
-                        self.inventory['_meta']['hostvars'][host_name] = server_vars
+            # Check if server matches filter criteria
+            if not self._should_include_server(server):
+                continue
+
+            # Get preferred IP address
+            ip_address, network_name = self._get_preferred_ip(server.addresses)
+            if not ip_address:
+                continue  # Skip if no suitable IP found
+
+            # Collect network interfaces information
+            network_interfaces = {}
+            for net_name, addresses in server.addresses.items():
+                network_interfaces[net_name] = [
+                    addr['addr'] for addr in addresses
+                    if addr['version'] == 4
+                ]
+
+            # Get flavor information
+            flavor_id = server.flavor['id']
+            flavor_name = flavors.get(flavor_id, f"unknown_flavor_{flavor_id}")
+
+            # Add host information
+            self.inventory['_meta']['hostvars'][server.name] = {
+                'ansible_host': ip_address,
+                'ansible_ssh_host': ip_address,
+                'openstack_id': server.id,
+                'openstack_name': server.name,
+                'preferred_network': network_name,
+                'network_interfaces': network_interfaces,
+                'openstack_metadata': server.metadata,
+                'openstack_flavor_id': flavor_id,
+                'openstack_flavor_name': flavor_name
+            }
+
+            # Add host to groups
+            self._add_host_to_groups(server.name, server.metadata)
 
     def json_format_dict(self, data):
         """
-        Format inventory data as JSON.
-        
-        Args:
-            data (dict): Inventory data
-        Returns:
-            str: JSON formatted string
+        Format dictionary as JSON
         """
         return json.dumps(data, sort_keys=True, indent=2)
 
     def get_inventory(self):
         """
-        Build and return the complete inventory.
+        Build and return the inventory
         """
         self._get_groups()
         self._get_hosts()
-        self._create_combined_groups()
         return self.json_format_dict(self.inventory)
 
 def main():
@@ -181,11 +228,10 @@ def main():
     args = parser.parse_args()
 
     inventory = OpenStackInventory()
-    
+
     if args.list:
         print(inventory.get_inventory())
     elif args.host:
-        # Empty dict as we store host variables in _meta
         print(json.dumps({}))
 
 if __name__ == '__main__':
