@@ -1,42 +1,68 @@
-# Динамический инвентарь Ansible для OpenStack
+# OpenStack Dynamic Inventory для Ansible
 
-Скрипт динамического инвентаря для Ansible, который автоматически обнаруживает и группирует хосты в OpenStack с поддержкой множественных сетей и метаданных в стиле Terraform.
+Скрипт динамического инвентаря для Ansible, который фильтрует и группирует хосты OpenStack на основе метаданных и управляет приоритетом сетевых интерфейсов для подключения.
 
 ## Возможности
 
-- Автоматическое обнаружение всех инстансов в OpenStack
+- Фильтрация инстансов по тегу environment
+- Автоматическая группировка по метаданным
+- Приоритизация сетевых интерфейсов для подключения
+- Получение информации о flavor'ах инстансов
 - Поддержка множественных сетевых интерфейсов
-- Группировка на основе метаданных Terraform
-- Иерархическая структура групп
-- Автоматическое создание комбинированных групп
-- Поддержка разных сетей для SSH-подключений
+- Гибкая конфигурация через YAML файл
 
 ## Требования
 
-Установите необходимые зависимости:
+- Python 3.6+
+- OpenStack SDK
+- PyYAML
+- Доступ к API OpenStack
+
+## Установка
+
+1. Установите зависимости:
 ```bash
-pip install -r requirements.txt
+pip install openstacksdk pyyaml
 ```
 
-Содержимое `requirements.txt`:
-```
-python-openstackclient>=6.0.0
-openstacksdk>=1.0.0
-ansible-core>=2.13.0
-jmespath>=1.0.1
-netaddr>=0.8.0
-PyYAML>=6.0
-requests>=2.28.0
-cryptography>=38.0.0
-python-keystoneclient>=5.0.0
+2. Скопируйте скрипт и сделайте его исполняемым:
+```bash
+cp openstack_inventory.py /etc/ansible/inventory/
+chmod +x /etc/ansible/inventory/openstack_inventory.py
 ```
 
-## Настройка окружения
+3. Создайте конфигурационный файл:
+```bash
+cp inventory_config.yaml /etc/ansible/inventory/
+```
 
-### Переменные окружения OpenStack
+## Конфигурация
 
-Настройте переменные окружения:
+### Структура конфигурационного файла (inventory_config.yaml)
 
+```yaml
+all:
+  vars:
+    inventory_settings:
+      environment_tag: "environment"    # имя тега для фильтрации
+      environment_value: "dwh"          # значение тега для фильтрации
+      base_group_name: "dwh"           # имя базовой группы в инвентаре
+      network_priority:                 # приоритет сетей (от высшего к низшему)
+        - "internal_cloud_network"
+        - "ps_colo_int_1"
+      debug:
+        enabled: false
+        log_file: "inventory.log"
+```
+
+### Переменные окружения
+
+1. Для конфигурации скрипта:
+```bash
+export INVENTORY_CONFIG=/etc/ansible/inventory/inventory_config.yaml
+```
+
+2. Для подключения к OpenStack:
 ```bash
 export OS_AUTH_URL=http://your-openstack-auth-url:5000/v3
 export OS_PROJECT_NAME=your-project
@@ -47,167 +73,99 @@ export OS_PROJECT_DOMAIN_NAME=default
 export OS_USER_DOMAIN_NAME=default
 ```
 
-### Или используйте clouds.yaml
+## Использование
 
-```yaml
-clouds:
-  openstack:
-    auth:
-      auth_url: http://your-openstack-auth-url:5000/v3
-      username: your-username
-      password: your-password
-      project_name: your-project
-      project_domain_name: default
-      user_domain_name: default
-    region_name: your-region
-```
+### Базовое использование
 
-## Установка
-
-1. Скопируйте скрипт `openstack_inventory.py` в директорию вашего проекта
-2. Сделайте скрипт исполняемым:
-```bash
-chmod +x openstack_inventory.py
-```
-
-## Конфигурация Ansible
-
-### ansible.cfg
-```ini
-[inventory]
-enable_plugins = script
-
-[defaults]
-inventory = /path/to/openstack_inventory.py
-```
-
-### Проверка инвентаря
+1. Проверка работы скрипта:
 ```bash
 ./openstack_inventory.py --list
 ```
 
-## Использование с Terraform
-
-### Пример метаданных Terraform
-```hcl
-resource "openstack_compute_instance_v2" "instance" {
-  name = "postgres-master-01"
-  # ... другие параметры ...
-
-  metadata = {
-    environment  = "dwh"
-    project     = "dwh"
-    service_type = "postgres"
-    role        = "master"
-  }
-}
+2. Использование в Ansible:
+```bash
+ansible-playbook -i openstack_inventory.py playbook.yml
 ```
 
-## Примеры использования
+### Группировка хостов
 
-### 1. Базовое использование
+Скрипт автоматически создает следующие группы:
+
+1. Базовая группа (по умолчанию "dwh")
+2. Группы на основе метаданных (например, "project_analytics", "role_master")
+
+Пример использования групп в плейбуке:
 ```yaml
-- hosts: tag_environment_dwh
+- hosts: dwh
   tasks:
-    - name: Настройка серверов DWH окружения
+    - name: Все хосты с environment=dwh
+      # tasks...
+
+- hosts: role_master
+  tasks:
+    - name: Все master-ноды
+      # tasks...
+
+- hosts: project_analytics
+  tasks:
+    - name: Все хосты проекта analytics
       # tasks...
 ```
 
-### 2. Использование с конкретной сетью
-```yaml
-- hosts: tag_service_type_postgres:&network_private
-  tasks:
-    - name: Настройка PostgreSQL через приватную сеть
-      # tasks...
-```
-
-### 3. Комбинированные группы
-```yaml
-- hosts: postgres_dwh
-  tasks:
-    - name: Настройка PostgreSQL в DWH окружении
-      # tasks...
-```
-
-### 4. С использованием бастиона
-```yaml
-- hosts: tag_role_master
-  vars:
-    ansible_ssh_common_args: '-o ProxyCommand="ssh -W %h:%p bastion.internal"'
-  tasks:
-    - name: Настройка master-нод
-      # tasks...
-```
-
-## Структура групп
-
-Скрипт создает следующую структуру групп:
-
-1. Группы по типам метаданных:
-   - `type_environment`
-   - `type_project`
-   - `type_service_type`
-   - `type_role`
-
-2. Группы по значениям метаданных:
-   - `tag_environment_dwh`
-   - `tag_service_type_postgres`
-   - `tag_role_master`
-   и т.д.
-
-3. Группы по сетям:
-   - `network_private`
-   - `network_public`
-
-4. Комбинированные группы:
-   - `postgres_dwh`
-   - `redis_prod`
-   и т.д.
-
-## Переменные хоста
+### Доступные переменные хоста
 
 Для каждого хоста доступны следующие переменные:
 
 ```yaml
 hostvars:
-  webserver_private:
-    ansible_host: "10.0.0.2"
-    network_name: "private"
-    network_interfaces:
-      private: ["10.0.0.2"]
-      public: ["203.0.113.2"]
-    openstack_id: "instance-id"
-    openstack_name: "server-name"
-    openstack_status: "ACTIVE"
-    environment: "dwh"
-    project: "dwh"
-    service_type: "postgres"
-    role: "master"
+  your-server-name:
+    ansible_host: "10.0.0.2"              # IP для подключения
+    ansible_ssh_host: "10.0.0.2"          # IP для подключения (дублирование для совместимости)
+    openstack_id: "instance-id"           # ID инстанса
+    openstack_name: "server-name"         # Имя сервера
+    preferred_network: "network-name"      # Имя используемой сети
+    network_interfaces:                    # Все доступные сетевые интерфейсы
+      network1: ["10.0.0.2"]
+      network2: ["192.168.1.2"]
+    openstack_metadata:                    # Метаданные сервера
+      environment: "dwh"
+      project: "analytics"
+      role: "master"
+    openstack_flavor_id: "flavor-id"      # ID типа инстанса
+    openstack_flavor_name: "flavor-name"  # Имя типа инстанса
 ```
 
 ## Отладка
 
-### Просмотр всех групп и хостов
+1. Проверка списка всех хостов и групп:
 ```bash
 ./openstack_inventory.py --list | jq
 ```
 
-### Просмотр переменных конкретного хоста
+2. Просмотр информации о конкретном хосте:
 ```bash
 ./openstack_inventory.py --host hostname | jq
 ```
+
+## Приоритет сетей
+
+Скрипт выбирает IP для подключения в следующем порядке:
+1. Ищет сети из списка network_priority в указанном порядке
+2. Если сеть найдена, использует первый доступный IPv4 адрес из этой сети
+3. Если приоритетные сети не найдены, использует первый доступный IPv4 адрес из любой сети
+
+## Обработка ошибок
+
+Скрипт завершится с ошибкой в следующих случаях:
+- Не найден конфигурационный файл
+- Ошибка в формате конфигурационного файла
+- Отсутствуют обязательные параметры конфигурации
+- Не удалось подключиться к OpenStack
+- Ошибка при получении данных из OpenStack
 
 ## Известные ограничения
 
 1. Поддерживаются только IPv4 адреса
 2. Требуется доступ к API OpenStack
-3. Производительность зависит от количества серверов и скорости API OpenStack
-
-## Советы по использованию
-
-1. Используйте консистентную схему именования серверов
-2. Добавляйте все необходимые метаданные при создании серверов в Terraform
-3. Группируйте серверы по всем важным признакам через метаданные
-4. Используйте разные сети для разных типов доступа
-5. Настраивайте SSH через бастион для безопасного доступа
-
+3. При отсутствии подходящего IP адреса хост не будет добавлен в инвентарь
+4. Все имена групп генерируются в формате `key_value` из метаданных
