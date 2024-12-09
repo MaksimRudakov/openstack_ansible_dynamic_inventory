@@ -1,6 +1,6 @@
 # OpenStack Dynamic Inventory for Ansible
 
-A dynamic inventory script for Ansible that filters and groups OpenStack hosts based on metadata and manages network interface priority for connections.
+A dynamic inventory script for Ansible that filters and groups OpenStack hosts based on metadata, manages network interface priority for connections, and collects information about network interfaces, including MAC addresses and tags.
 
 ## Features
 
@@ -8,15 +8,15 @@ A dynamic inventory script for Ansible that filters and groups OpenStack hosts b
 - Automatic grouping by metadata
 - Network interface prioritization for connections
 - Instance flavor information retrieval
-- Multiple network interface support
-- Flexible YAML configuration
+- Network interface information collection (MAC addresses, tags)
+- Flexible configuration via YAML file
 
 ## Requirements
 
 - Python 3.6+
 - OpenStack SDK
 - PyYAML
-- OpenStack API access
+- Access to OpenStack API
 
 ## Installation
 
@@ -50,19 +50,10 @@ all:
       network_priority:                 # network priority (highest to lowest)
         - "internal_cloud_network"
         - "ps_colo_int_1"
-      debug:
-        enabled: false
-        log_file: "inventory.log"
 ```
 
-### Environment Variables
+### OpenStack Environment Variables
 
-1. For script configuration:
-```bash
-export INVENTORY_CONFIG=/etc/ansible/inventory/inventory_config.yaml
-```
-
-2. For OpenStack connection:
 ```bash
 export OS_AUTH_URL=http://your-openstack-auth-url:5000/v3
 export OS_PROJECT_NAME=your-project
@@ -73,99 +64,109 @@ export OS_PROJECT_DOMAIN_NAME=default
 export OS_USER_DOMAIN_NAME=default
 ```
 
-## Usage
+## Inventory Structure
 
-### Basic Usage
-
-1. Test script operation:
-```bash
-./openstack_inventory.py --list
-```
-
-2. Use with Ansible:
-```bash
-ansible-playbook -i openstack_inventory.py playbook.yml
-```
-
-### Host Grouping
-
-The script automatically creates the following groups:
-
-1. Base group (default "dwh")
-2. Metadata-based groups (e.g., "project_analytics", "role_master")
-
-Example of using groups in playbook:
-```yaml
-- hosts: dwh
-  tasks:
-    - name: All hosts with environment=dwh
-      # tasks...
-
-- hosts: role_master
-  tasks:
-    - name: All master nodes
-      # tasks...
-
-- hosts: project_analytics
-  tasks:
-    - name: All hosts in analytics project
-      # tasks...
-```
-
-### Available Host Variables
+### Host Information
 
 The following variables are available for each host:
 
 ```yaml
 hostvars:
   your-server-name:
-    ansible_host: "10.0.0.2"              # Connection IP
-    ansible_ssh_host: "10.0.0.2"          # Connection IP (duplicate for compatibility)
+    ansible_host: "10.0.0.2"              # IP for connection
+    ansible_ssh_host: "10.0.0.2"          # IP for connection (duplicate for compatibility)
     openstack_id: "instance-id"           # Instance ID
     openstack_name: "server-name"         # Server name
     preferred_network: "network-name"      # Used network name
-    network_interfaces:                    # All available network interfaces
-      network1: ["10.0.0.2"]
-      network2: ["192.168.1.2"]
     openstack_metadata:                    # Server metadata
       environment: "dwh"
       project: "analytics"
       role: "master"
     openstack_flavor_id: "flavor-id"      # Instance type ID
     openstack_flavor_name: "flavor-name"  # Instance type name
+    network_interfaces:                    # Network interfaces information
+      network_name:                        # Network name
+        ipv4_addresses:                    # List of IPv4 addresses
+          - "10.0.0.2"
+        mac_addresses:                     # List of MAC addresses
+          - "fa:16:3e:xx:xx:xx"
+        port_id: "port-id-xxx"            # Port ID
+        port_name: "port-name"            # Port name
+        tags:                             # Interface tags
+          - "tag1"
+          - "tag2"
+        network_id: "net-id"              # Network ID
+```
+
+### Groups
+
+The script automatically creates the following groups:
+1. Base group (default "dwh")
+2. Groups based on metadata (e.g., "project_analytics", "role_master")
+
+## Usage Examples
+
+### Basic Usage
+
+```bash
+# Check inventory
+./openstack_inventory.py --list
+
+# Use with Ansible
+ansible-playbook -i openstack_inventory.py playbook.yml
+```
+
+### Playbook Examples
+
+1. Working with groups:
+```yaml
+- hosts: dwh
+  tasks:
+    - name: All hosts with environment=dwh
+      debug:
+        msg: "DWH host: {{ inventory_hostname }}"
+
+- hosts: role_master
+  tasks:
+    - name: All master nodes
+      debug:
+        msg: "Master node: {{ inventory_hostname }}"
+```
+
+2. Working with network interfaces:
+```yaml
+- hosts: dwh
+  tasks:
+    - name: Show network interfaces information
+      debug:
+        msg: >
+          Interface {{ item.key }}:
+          MAC: {{ item.value.mac_addresses | join(', ') }}
+          Tags: {{ item.value.tags | join(', ') }}
+          Port ID: {{ item.value.port_id }}
+      loop: "{{ hostvars[inventory_hostname].network_interfaces | dict2items }}"
+
+    - name: Check interface tags
+      debug:
+        msg: "Found interface with required tag"
+      when: "'required-tag' in hostvars[inventory_hostname].network_interfaces[item.key].tags"
+      loop: "{{ hostvars[inventory_hostname].network_interfaces | dict2items }}"
 ```
 
 ## Debugging
 
-1. Check list of all hosts and groups:
 ```bash
+# View entire inventory
 ./openstack_inventory.py --list | jq
-```
 
-2. View information about specific host:
-```bash
+# View specific host information
 ./openstack_inventory.py --host hostname | jq
 ```
-
-## Network Priority
-
-The script selects connection IP in the following order:
-1. Looks for networks from network_priority list in specified order
-2. If network is found, uses first available IPv4 address from that network
-3. If priority networks not found, uses first available IPv4 address from any network
-
-## Error Handling
-
-The script will exit with error in the following cases:
-- Configuration file not found
-- Configuration file format error
-- Missing required configuration parameters
-- Failed to connect to OpenStack
-- Error retrieving data from OpenStack
 
 ## Known Limitations
 
 1. Only IPv4 addresses are supported
-2. OpenStack API access required
+2. OpenStack API access is required
 3. Host will not be added to inventory if no suitable IP address is found
-4. All group names are generated in `key_value` format from metadata
+4. Group names are generated in `key_value` format from metadata
+5. Requires permissions to get port information in OpenStack

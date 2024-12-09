@@ -1,6 +1,6 @@
 # OpenStack Dynamic Inventory для Ansible
 
-Скрипт динамического инвентаря для Ansible, который фильтрует и группирует хосты OpenStack на основе метаданных и управляет приоритетом сетевых интерфейсов для подключения.
+Скрипт динамического инвентаря для Ansible, который фильтрует и группирует хосты OpenStack на основе метаданных, управляет приоритетом сетевых интерфейсов для подключения и собирает информацию о сетевых интерфейсах, включая MAC-адреса и теги.
 
 ## Возможности
 
@@ -8,7 +8,7 @@
 - Автоматическая группировка по метаданным
 - Приоритизация сетевых интерфейсов для подключения
 - Получение информации о flavor'ах инстансов
-- Поддержка множественных сетевых интерфейсов
+- Сбор информации о сетевых интерфейсах (MAC-адреса, теги)
 - Гибкая конфигурация через YAML файл
 
 ## Требования
@@ -50,19 +50,10 @@ all:
       network_priority:                 # приоритет сетей (от высшего к низшему)
         - "internal_cloud_network"
         - "ps_colo_int_1"
-      debug:
-        enabled: false
-        log_file: "inventory.log"
 ```
 
-### Переменные окружения
+### Переменные окружения OpenStack
 
-1. Для конфигурации скрипта:
-```bash
-export INVENTORY_CONFIG=/etc/ansible/inventory/inventory_config.yaml
-```
-
-2. Для подключения к OpenStack:
 ```bash
 export OS_AUTH_URL=http://your-openstack-auth-url:5000/v3
 export OS_PROJECT_NAME=your-project
@@ -73,46 +64,9 @@ export OS_PROJECT_DOMAIN_NAME=default
 export OS_USER_DOMAIN_NAME=default
 ```
 
-## Использование
+## Структура инвентаря
 
-### Базовое использование
-
-1. Проверка работы скрипта:
-```bash
-./openstack_inventory.py --list
-```
-
-2. Использование в Ansible:
-```bash
-ansible-playbook -i openstack_inventory.py playbook.yml
-```
-
-### Группировка хостов
-
-Скрипт автоматически создает следующие группы:
-
-1. Базовая группа (по умолчанию "dwh")
-2. Группы на основе метаданных (например, "project_analytics", "role_master")
-
-Пример использования групп в плейбуке:
-```yaml
-- hosts: dwh
-  tasks:
-    - name: Все хосты с environment=dwh
-      # tasks...
-
-- hosts: role_master
-  tasks:
-    - name: Все master-ноды
-      # tasks...
-
-- hosts: project_analytics
-  tasks:
-    - name: Все хосты проекта analytics
-      # tasks...
-```
-
-### Доступные переменные хоста
+### Информация о хостах
 
 Для каждого хоста доступны следующие переменные:
 
@@ -124,48 +78,95 @@ hostvars:
     openstack_id: "instance-id"           # ID инстанса
     openstack_name: "server-name"         # Имя сервера
     preferred_network: "network-name"      # Имя используемой сети
-    network_interfaces:                    # Все доступные сетевые интерфейсы
-      network1: ["10.0.0.2"]
-      network2: ["192.168.1.2"]
     openstack_metadata:                    # Метаданные сервера
       environment: "dwh"
       project: "analytics"
       role: "master"
     openstack_flavor_id: "flavor-id"      # ID типа инстанса
     openstack_flavor_name: "flavor-name"  # Имя типа инстанса
+    network_interfaces:                    # Информация о сетевых интерфейсах
+      network_name:                        # Имя сети
+        ipv4_addresses:                    # Список IPv4 адресов
+          - "10.0.0.2"
+        mac_addresses:                     # Список MAC-адресов
+          - "fa:16:3e:xx:xx:xx"
+        port_id: "port-id-xxx"            # ID порта
+        port_name: "port-name"            # Имя порта
+        tags:                             # Теги интерфейса
+          - "tag1"
+          - "tag2"
+        network_id: "net-id"              # ID сети
+```
+
+### Группы
+
+Скрипт автоматически создает следующие группы:
+1. Базовая группа (по умолчанию "dwh")
+2. Группы на основе метаданных (например, "project_analytics", "role_master")
+
+## Примеры использования
+
+### Базовое использование
+
+```bash
+# Проверка инвентаря
+./openstack_inventory.py --list
+
+# Использование с Ansible
+ansible-playbook -i openstack_inventory.py playbook.yml
+```
+
+### Примеры плейбуков
+
+1. Работа с группами:
+```yaml
+- hosts: dwh
+  tasks:
+    - name: Все хосты с environment=dwh
+      debug:
+        msg: "DWH host: {{ inventory_hostname }}"
+
+- hosts: role_master
+  tasks:
+    - name: Все master-ноды
+      debug:
+        msg: "Master node: {{ inventory_hostname }}"
+```
+
+2. Работа с сетевыми интерфейсами:
+```yaml
+- hosts: dwh
+  tasks:
+    - name: Показать информацию о сетевых интерфейсах
+      debug:
+        msg: >
+          Interface {{ item.key }}:
+          MAC: {{ item.value.mac_addresses | join(', ') }}
+          Tags: {{ item.value.tags | join(', ') }}
+          Port ID: {{ item.value.port_id }}
+      loop: "{{ hostvars[inventory_hostname].network_interfaces | dict2items }}"
+
+    - name: Проверка тегов интерфейса
+      debug:
+        msg: "Found interface with required tag"
+      when: "'required-tag' in hostvars[inventory_hostname].network_interfaces[item.key].tags"
+      loop: "{{ hostvars[inventory_hostname].network_interfaces | dict2items }}"
 ```
 
 ## Отладка
 
-1. Проверка списка всех хостов и групп:
 ```bash
+# Просмотр всего инвентаря
 ./openstack_inventory.py --list | jq
-```
 
-2. Просмотр информации о конкретном хосте:
-```bash
+# Просмотр информации о конкретном хосте
 ./openstack_inventory.py --host hostname | jq
 ```
-
-## Приоритет сетей
-
-Скрипт выбирает IP для подключения в следующем порядке:
-1. Ищет сети из списка network_priority в указанном порядке
-2. Если сеть найдена, использует первый доступный IPv4 адрес из этой сети
-3. Если приоритетные сети не найдены, использует первый доступный IPv4 адрес из любой сети
-
-## Обработка ошибок
-
-Скрипт завершится с ошибкой в следующих случаях:
-- Не найден конфигурационный файл
-- Ошибка в формате конфигурационного файла
-- Отсутствуют обязательные параметры конфигурации
-- Не удалось подключиться к OpenStack
-- Ошибка при получении данных из OpenStack
 
 ## Известные ограничения
 
 1. Поддерживаются только IPv4 адреса
 2. Требуется доступ к API OpenStack
 3. При отсутствии подходящего IP адреса хост не будет добавлен в инвентарь
-4. Все имена групп генерируются в формате `key_value` из метаданных
+4. Имена групп генерируются в формате `key_value` из метаданных
+5. Требуются права на получение информации о портах в OpenStack
