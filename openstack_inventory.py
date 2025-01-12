@@ -20,11 +20,11 @@ class OpenStackInventory(object):
         """
         settings = config.get('all', {}).get('vars', {}).get('inventory_settings', {})
         required_fields = ['environment_tag', 'environment_value', 'base_group_name']
-        
+
         for field in required_fields:
             if field not in settings:
                 sys.exit(f"Required configuration field missing: {field}")
-                
+
         if 'network_priority' not in settings or not isinstance(settings['network_priority'], list):
             sys.exit("network_priority must be a list of network names")
 
@@ -33,7 +33,7 @@ class OpenStackInventory(object):
         Load configuration from YAML file
         """
         config_path = os.getenv('INVENTORY_CONFIG', 'inventory_config.yaml')
-        
+
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
@@ -83,11 +83,11 @@ class OpenStackInventory(object):
         """
         if not hasattr(server, 'metadata'):
             return False
-            
+
         env_tag = self.filter_config['environment_tag']
         env_value = self.filter_config['environment_value']
-        
-        return (env_tag in server.metadata and 
+
+        return (env_tag in server.metadata and
                 server.metadata[env_tag] == env_value)
 
     def _get_preferred_ip(self, addresses):
@@ -138,7 +138,7 @@ class OpenStackInventory(object):
         """
         base_group = self.filter_config['base_group_name']
         env_tag = self.filter_config['environment_tag']
-        
+
         # Add to base group
         if hostname not in self.inventory[base_group]['hosts']:
             self.inventory[base_group]['hosts'].append(hostname)
@@ -190,7 +190,7 @@ class OpenStackInventory(object):
             ports_info = self._get_ports_info()
         except Exception as e:
             sys.exit(f"Failed to get data from OpenStack: {e}")
-        
+
         for server in servers:
             # Check if server matches filter criteria
             if not self._should_include_server(server):
@@ -203,38 +203,38 @@ class OpenStackInventory(object):
 
             # Collect network interfaces information
             network_interfaces = {}
-            
+
             # Process all interfaces from server.addresses
             for net_name, addresses in server.addresses.items():
                 if net_name not in network_interfaces:
-                    network_interfaces[net_name] = {
-                        'ipv4_addresses': [],
-                        'mac_addresses': [],
-                        'port_id': None,
-                        'port_name': '',
-                        'tags': [],
-                        'network_id': ''
-                    }
+                    network_interfaces[net_name] = []
 
                 for address in addresses:
-                    # Get IPv4 addresses
-                    if address['version'] == 4:
-                        network_interfaces[net_name]['ipv4_addresses'].append(address['addr'])
-                    
-                    # Get MAC address and match with ports info
-                    if 'OS-EXT-IPS-MAC:mac_addr' in address:
-                        mac_addr = address['OS-EXT-IPS-MAC:mac_addr']
-                        if mac_addr not in network_interfaces[net_name]['mac_addresses']:
-                            network_interfaces[net_name]['mac_addresses'].append(mac_addr)
-                        
-                        # Find matching port info by MAC address
-                        for port_id, port_info in ports_info.items():
-                            if port_info['mac_address'] == mac_addr:
-                                network_interfaces[net_name]['port_id'] = port_id
-                                network_interfaces[net_name]['port_name'] = port_info['name']
-                                network_interfaces[net_name]['tags'] = port_info['tags']
-                                network_interfaces[net_name]['network_id'] = port_info['network_id']
-                                break
+                    if address['version'] == 4:  # Process IPv4 addresses only
+                        interface_info = {
+                            'ip_address': address['addr'],
+                            'mac_address': None,
+                            'tags': [],
+                            'port_id': None,
+                            'port_name': None,
+                            'network_id': None
+                        }
+
+                        # Match MAC address with ports info
+                        if 'OS-EXT-IPS-MAC:mac_addr' in address:
+                            mac_addr = address['OS-EXT-IPS-MAC:mac_addr']
+                            interface_info['mac_address'] = mac_addr
+
+                            # Find matching port info by MAC address
+                            for port_id, port_info in ports_info.items():
+                                if port_info['mac_address'] == mac_addr:
+                                    interface_info['port_id'] = port_id
+                                    interface_info['port_name'] = port_info['name']
+                                    interface_info['tags'] = port_info['tags']
+                                    interface_info['network_id'] = port_info['network_id']
+                                    break
+
+                        network_interfaces[net_name].append(interface_info)
 
             # Get flavor information
             flavor_id = server.flavor['id']
@@ -277,7 +277,7 @@ def main():
     args = parser.parse_args()
 
     inventory = OpenStackInventory()
-    
+
     if args.list:
         print(inventory.get_inventory())
     elif args.host:
